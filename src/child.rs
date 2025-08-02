@@ -462,8 +462,8 @@ impl StderrThread {
                         let line = &buffer[..offset];
                         let line = str::from_utf8(line).map_err(|_| line);
                         match line {
-                            Ok(string) => info!("{string}"),
-                            Err(bytes) => info!("{bytes:?}"),
+                            Ok(string) => info!(target: "cmd_lib::stderr", "{string}"),
+                            Err(bytes) => info!(target: "cmd_lib::stderr", "{bytes:?}"),
                         }
                         buffer = buffer.split_off(offset + 1);
                     }
@@ -478,8 +478,8 @@ impl StderrThread {
                     let line = &buffer;
                     let line = str::from_utf8(line).map_err(|_| line);
                     match line {
-                        Ok(string) => info!("{string}"),
-                        Err(bytes) => info!("{bytes:?}"),
+                        Ok(string) => info!(target: "cmd_lib::stderr", "{string}"),
+                        Err(bytes) => info!(target: "cmd_lib::stderr", "{bytes:?}"),
                     }
                 }
 
