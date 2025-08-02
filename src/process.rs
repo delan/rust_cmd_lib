@@ -1,5 +1,5 @@
 use crate::builtins::*;
-use crate::child::{CmdChild, CmdChildHandle, CmdChildren, FunChildren};
+use crate::child::{log_output, CmdChild, CmdChildHandle, CmdChildren, FunChildren};
 use crate::io::{CmdIn, CmdOut};
 use crate::{debug, warn};
 use crate::{CmdResult, FunResult};
@@ -135,6 +135,10 @@ pub(crate) fn pipefail_enabled() -> bool {
         .unwrap_or_else(|| PIPEFAIL_ENABLED.load(SeqCst))
 }
 
+pub(crate) fn log_stdout_enabled() -> bool {
+    LOG_STDOUT_ENABLED.get()
+}
+
 thread_local! {
     /// Whether debug mode is enabled in the current thread.
     /// None means to use the global setting in [`DEBUG_ENABLED`].
@@ -143,6 +147,9 @@ thread_local! {
     /// Whether pipefail mode is enabled in the current thread.
     /// None means to use the global setting in [`PIPEFAIL_ENABLED`].
     static PIPEFAIL_OVERRIDE: Cell<Option<bool>> = Cell::new(None);
+
+    /// Whether log stdout mode is enabled in the current thread.
+    static LOG_STDOUT_ENABLED: Cell<bool> = Cell::new(false);
 }
 
 /// Overrides the debug mode in the current thread, while the value is in scope.
@@ -174,6 +181,21 @@ pub struct ScopedDebug(Option<bool>, PhantomData<*const ()>);
 /// # Ok::<(), std::io::Error>(())
 /// ```
 pub struct ScopedPipefail(Option<bool>, PhantomData<*const ()>);
+
+/// Overrides the log stdout mode in the current thread, while the value is in scope.
+///
+/// Each override restores the previous value when dropped, so they can be nested.
+/// Since overrides are thread-local, these values can’t be sent across threads.
+// PhantomData field is equivalent to `impl !Send for Self {}`
+///
+/// ```
+/// # use cmd_lib::{ScopedLogStdout, run_cmd};
+/// // Must give the variable a name, not just `_`
+/// let _debug = ScopedLogStdout::set(true);
+/// run_cmd!(echo "hello world")?; // Will have log stdout on
+/// # Ok::<(), std::io::Error>(())
+/// ```
+pub struct ScopedLogStdout(bool, PhantomData<*const ()>);
 
 impl ScopedDebug {
     /// ```compile_fail
@@ -216,6 +238,28 @@ impl ScopedPipefail {
 impl Drop for ScopedPipefail {
     fn drop(&mut self) {
         PIPEFAIL_OVERRIDE.set(self.0)
+    }
+}
+
+impl ScopedLogStdout {
+    /// ```compile_fail
+    /// let _: Box<dyn Send> = Box::new(cmd_lib::ScopedLogStdout::set(true));
+    /// ```
+    /// ```compile_fail
+    /// let _: Box<dyn Sync> = Box::new(cmd_lib::ScopedLogStdout::set(true));
+    /// ```
+    #[doc(hidden)]
+    pub fn test_not_send_not_sync() {}
+
+    pub fn set(enabled: bool) -> Self {
+        let result = Self(LOG_STDOUT_ENABLED.get(), PhantomData);
+        LOG_STDOUT_ENABLED.set(enabled);
+        result
+    }
+}
+impl Drop for ScopedLogStdout {
+    fn drop(&mut self) {
+        LOG_STDOUT_ENABLED.set(self.0)
     }
 }
 
@@ -340,7 +384,16 @@ impl Cmds {
     }
 
     fn run_cmd(&mut self, current_dir: &mut PathBuf) -> CmdResult {
-        self.spawn(current_dir, false)?.wait()
+        if log_stdout_enabled() {
+            let file = self.file.clone();
+            let line = self.line;
+            self.spawn_with_output(current_dir)?
+                .wait_with_pipe(&mut |mut stdout| {
+                    log_output("cmd_lib::stdout", line, &file, &mut stdout);
+                })
+        } else {
+            self.spawn(current_dir, false)?.wait()
+        }
     }
 
     fn run_fun(&mut self, current_dir: &mut PathBuf) -> FunResult {

@@ -468,50 +468,7 @@ impl OutputThread {
                     OutputDest::Log(target) => target,
                 };
 
-                // Log output one line at a time, including progress output separated by CR
-                let mut reader = BufReader::new(output_reader);
-                let mut buffer = vec![];
-                loop {
-                    // Unconditionally try to read more data, since the BufReader buffer is empty
-                    let result = match reader.fill_buf() {
-                        Ok(buffer) => buffer,
-                        Err(error) => {
-                            warn!("Error reading from child process: {error:?} at {file_}:{line}");
-                            break;
-                        }
-                    };
-                    // Add the result onto our own buffer
-                    buffer.extend(result);
-                    // Empty the BufReader
-                    let read_len = result.len();
-                    reader.consume(read_len);
-
-                    // Log output. Take whole “lines” at every LF or CR (for progress bars etc),
-                    // but leave any incomplete lines in our buffer so we can try to complete them.
-                    while let Some(offset) = buffer.iter().position(|&b| b == b'\n' || b == b'\r') {
-                        let line = &buffer[..offset];
-                        let line = str::from_utf8(line).map_err(|_| line);
-                        match line {
-                            Ok(string) => info!(target: log_target, "{string}"),
-                            Err(bytes) => info!(target: log_target, "{bytes:?}"),
-                        }
-                        buffer = buffer.split_off(offset + 1);
-                    }
-
-                    if read_len == 0 {
-                        break;
-                    }
-                }
-
-                // Log any remaining incomplete line
-                if !buffer.is_empty() {
-                    let line = &buffer;
-                    let line = str::from_utf8(line).map_err(|_| line);
-                    match line {
-                        Ok(string) => info!(target: log_target, "{string}"),
-                        Err(bytes) => info!(target: log_target, "{bytes:?}"),
-                    }
-                }
+                log_output(log_target, line, &file_, output_reader);
 
                 "".to_owned()
             });
@@ -544,6 +501,53 @@ impl OutputThread {
             }
         }
         "".into()
+    }
+}
+
+pub fn log_output(log_target: &'static str, line: u32, file: &str, output_reader: impl Read) {
+    // Log output one line at a time, including progress output separated by CR
+    let mut reader = BufReader::new(output_reader);
+    let mut buffer = vec![];
+    loop {
+        // Unconditionally try to read more data, since the BufReader buffer is empty
+        let result = match reader.fill_buf() {
+            Ok(buffer) => buffer,
+            Err(error) => {
+                warn!("Error reading from child process: {error:?} at {file}:{line}");
+                break;
+            }
+        };
+        // Add the result onto our own buffer
+        buffer.extend(result);
+        // Empty the BufReader
+        let read_len = result.len();
+        reader.consume(read_len);
+
+        // Log output. Take whole “lines” at every LF or CR (for progress bars etc),
+        // but leave any incomplete lines in our buffer so we can try to complete them.
+        while let Some(offset) = buffer.iter().position(|&b| b == b'\n' || b == b'\r') {
+            let line = &buffer[..offset];
+            let line = str::from_utf8(line).map_err(|_| line);
+            match line {
+                Ok(string) => info!(target: log_target, "{string}"),
+                Err(bytes) => info!(target: log_target, "{bytes:?}"),
+            }
+            buffer = buffer.split_off(offset + 1);
+        }
+
+        if read_len == 0 {
+            break;
+        }
+    }
+
+    // Log any remaining incomplete line
+    if !buffer.is_empty() {
+        let line = &buffer;
+        let line = str::from_utf8(line).map_err(|_| line);
+        match line {
+            Ok(string) => info!(target: log_target, "{string}"),
+            Err(bytes) => info!(target: log_target, "{bytes:?}"),
+        }
     }
 }
 
