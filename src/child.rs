@@ -124,7 +124,7 @@ impl FunChildren {
     /// then the rest of stdout is automatically read and discarded to allow the child to finish.
     pub fn wait_with_pipe(&mut self, f: &mut dyn FnMut(&mut Box<dyn Read>)) -> CmdResult {
         let mut last_child = self.children.pop().unwrap();
-        let mut stderr_thread = StderrThread::new(
+        let mut stderr_thread = OutputThread::new_stderr(
             &last_child.cmd,
             &last_child.file,
             last_child.line,
@@ -227,7 +227,7 @@ impl CmdChild {
 
     fn wait(mut self, is_last: bool) -> CmdResult {
         let _stderr_thread =
-            StderrThread::new(&self.cmd, &self.file, self.line, self.stderr.take(), false);
+            OutputThread::new_stderr(&self.cmd, &self.file, self.line, self.stderr.take(), false);
         let res = self.handle.wait(&self.cmd, &self.file, self.line);
         if let Err(e) = res {
             if is_last || process::pipefail_enabled() {
@@ -252,7 +252,7 @@ impl CmdChild {
         stdout_buf: &mut Vec<u8>,
         stderr_buf: &mut String,
     ) -> CmdResult {
-        let mut stderr_thread = StderrThread::new(
+        let mut stderr_thread = OutputThread::new_stderr(
             &self.cmd,
             &self.file,
             self.line,
@@ -408,38 +408,68 @@ impl CmdChildHandle {
     }
 }
 
-struct StderrThread {
+pub(crate) struct OutputThread {
     thread: Option<JoinHandle<String>>,
     cmd: String,
     file: String,
     line: u32,
 }
 
-impl StderrThread {
-    fn new(cmd: &str, file: &str, line: u32, stderr: Option<PipeReader>, capture: bool) -> Self {
+pub(crate) enum OutputDest {
+    /// Return the output as a [String]
+    Capture,
+    /// Log the output at INFO level with the given target
+    Log(&'static str),
+}
+
+impl OutputThread {
+    pub fn new_stderr(
+        cmd: &str,
+        file: &str,
+        line: u32,
+        stderr: Option<impl Read + Send + 'static>,
+        capture: bool,
+    ) -> Self {
+        if capture {
+            Self::new(cmd, file, line, stderr, OutputDest::Capture)
+        } else {
+            Self::new(cmd, file, line, stderr, OutputDest::Log("cmd_lib::stderr"))
+        }
+    }
+
+    pub fn new(
+        cmd: &str,
+        file: &str,
+        line: u32,
+        output_reader: Option<impl Read + Send + 'static>,
+        dest: OutputDest,
+    ) -> Self {
         #[cfg(feature = "tracing")]
         let span = tracing::Span::current();
-        if let Some(stderr) = stderr {
+        if let Some(output_reader) = output_reader {
             let file_ = file.to_owned();
             let thread = std::thread::spawn(move || {
                 #[cfg(feature = "tracing")]
                 let _entered = span.enter();
-                if capture {
-                    let mut output = String::new();
-                    BufReader::new(stderr)
-                        .lines()
-                        .map_while(Result::ok)
-                        .for_each(|line| {
-                            if !output.is_empty() {
-                                output.push('\n');
-                            }
-                            output.push_str(&line);
-                        });
-                    return output;
-                }
+                let log_target = match dest {
+                    OutputDest::Capture => {
+                        let mut output = String::new();
+                        BufReader::new(output_reader)
+                            .lines()
+                            .map_while(Result::ok)
+                            .for_each(|line| {
+                                if !output.is_empty() {
+                                    output.push('\n');
+                                }
+                                output.push_str(&line);
+                            });
+                        return output;
+                    }
+                    OutputDest::Log(target) => target,
+                };
 
                 // Log output one line at a time, including progress output separated by CR
-                let mut reader = BufReader::new(stderr);
+                let mut reader = BufReader::new(output_reader);
                 let mut buffer = vec![];
                 loop {
                     // Unconditionally try to read more data, since the BufReader buffer is empty
@@ -462,8 +492,8 @@ impl StderrThread {
                         let line = &buffer[..offset];
                         let line = str::from_utf8(line).map_err(|_| line);
                         match line {
-                            Ok(string) => info!(target: "cmd_lib::stderr", "{string}"),
-                            Err(bytes) => info!(target: "cmd_lib::stderr", "{bytes:?}"),
+                            Ok(string) => info!(target: log_target, "{string}"),
+                            Err(bytes) => info!(target: log_target, "{bytes:?}"),
                         }
                         buffer = buffer.split_off(offset + 1);
                     }
@@ -478,8 +508,8 @@ impl StderrThread {
                     let line = &buffer;
                     let line = str::from_utf8(line).map_err(|_| line);
                     match line {
-                        Ok(string) => info!(target: "cmd_lib::stderr", "{string}"),
-                        Err(bytes) => info!(target: "cmd_lib::stderr", "{bytes:?}"),
+                        Ok(string) => info!(target: log_target, "{string}"),
+                        Err(bytes) => info!(target: log_target, "{bytes:?}"),
                     }
                 }
 
@@ -501,7 +531,7 @@ impl StderrThread {
         }
     }
 
-    fn join(&mut self) -> String {
+    pub fn join(&mut self) -> String {
         if let Some(thread) = self.thread.take() {
             match thread.join() {
                 Err(e) => {
@@ -517,7 +547,7 @@ impl StderrThread {
     }
 }
 
-impl Drop for StderrThread {
+impl Drop for OutputThread {
     fn drop(&mut self) {
         self.join();
     }
